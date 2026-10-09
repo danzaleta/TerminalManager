@@ -14,8 +14,7 @@ struct TerminalManagerApp: App {
         }
         
         Settings {
-            Text("Settings Placeholder")
-                .frame(width: 400, height: 300)
+            SettingsView()
         }
     }
 }
