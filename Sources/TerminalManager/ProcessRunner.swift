@@ -18,11 +18,17 @@ public struct ProcessRunner {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
+        var currentEnv = ProcessInfo.processInfo.environment
         if let env = environment {
-            var currentEnv = ProcessInfo.processInfo.environment
             currentEnv.merge(env) { (_, new) in new }
-            process.environment = currentEnv
         }
+        let additionalPath = "/opt/homebrew/bin:/usr/local/bin"
+        if let existingPath = currentEnv["PATH"] {
+            currentEnv["PATH"] = "\(additionalPath):\(existingPath)"
+        } else {
+            currentEnv["PATH"] = additionalPath
+        }
+        process.environment = currentEnv
         if let cwd = workingDirectory {
             process.currentDirectoryURL = cwd
         }
@@ -53,11 +59,17 @@ public struct ProcessRunner {
             let process = Process()
             process.executableURL = executableURL
             process.arguments = arguments
+            var currentEnv = ProcessInfo.processInfo.environment
             if let env = environment {
-                var currentEnv = ProcessInfo.processInfo.environment
                 currentEnv.merge(env) { (_, new) in new }
-                process.environment = currentEnv
             }
+            let additionalPath = "/opt/homebrew/bin:/usr/local/bin"
+            if let existingPath = currentEnv["PATH"] {
+                currentEnv["PATH"] = "\(additionalPath):\(existingPath)"
+            } else {
+                currentEnv["PATH"] = additionalPath
+            }
+            process.environment = currentEnv
             
             let outputPipe = Pipe()
             let errorPipe = Pipe()

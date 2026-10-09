@@ -18,7 +18,7 @@ class PackagesViewModel: ObservableObject {
                 let graph = DependencyGraph(response: response)
                 
                 var items = [(package: BrewPackage, totalSizeStr: String)]()
-                for pkg in response.formulae where pkg.installed.contains(where: { $0.installed_on_request }) {
+                for pkg in response.formulae where pkg.installed.contains(where: { $0.installed_on_request == true }) {
                     var visited = Set<String>()
                     let totalBytes = graph.sizeOf(package: pkg.name, visited: &visited)
                     items.append((package: pkg, totalSizeStr: graph.formattedSize(bytes: totalBytes)))
@@ -27,6 +27,8 @@ class PackagesViewModel: ObservableObject {
                 self.formulae = items.sorted { a, b in a.package.name < b.package.name }
             }
         } catch {
+            self.outputLog = "Error parsing: \(error)"
+            self.isUpdating = true // Hack to show the error view
             print("Error parsing: \(error)")
         }
     }

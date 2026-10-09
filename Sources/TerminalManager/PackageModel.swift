@@ -27,8 +27,8 @@ public struct BrewVersions: Codable {
 
 public struct BrewInstalled: Codable {
     public let version: String
-    public let installed_on_request: Bool
-    public let installed_as_dependency: Bool
+    public let installed_on_request: Bool?
+    public let installed_as_dependency: Bool?
     public let installed_size: Int?
 }
 
