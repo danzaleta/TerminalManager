@@ -35,7 +35,12 @@ public struct BrewInstalled: Codable {
 public struct BrewCask: Codable, Identifiable {
     public var id: String { token }
     public let token: String
-    public let name: [String]
+    public let name: [String]?
     public let desc: String?
-    public let version: String
+    public let version: String?
+    public let installed: String?
+    
+    public var displayName: String {
+        name?.first ?? token
+    }
 }

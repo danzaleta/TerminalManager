@@ -36,6 +36,30 @@ public struct DependencyGraph {
         return selfSize + depsSize
     }
     
+    public func sizeOf(cask: BrewCask) -> Int {
+        let prefix = ProcessInfo.processInfo.environment["HOMEBREW_PREFIX"] ?? "/opt/homebrew"
+        let possiblePaths = [
+            "/Applications/\(cask.displayName).app",
+            "/Applications/\(cask.token).app",
+            "\(prefix)/Caskroom/\(cask.token)"
+        ]
+        for path in possiblePaths {
+            if FileManager.default.fileExists(atPath: path) {
+                let url = URL(fileURLWithPath: path)
+                if let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) {
+                    var total = 0
+                    for case let fileURL as URL in enumerator {
+                        if let res = try? fileURL.resourceValues(forKeys: [.fileSizeKey]), let fileSize = res.fileSize {
+                            total += fileSize
+                        }
+                    }
+                    if total > 0 { return total }
+                }
+            }
+        }
+        return 0
+    }
+    
     public func formattedSize(bytes: Int) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useAll]

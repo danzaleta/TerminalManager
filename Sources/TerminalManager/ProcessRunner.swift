@@ -38,14 +38,24 @@ public struct ProcessRunner {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         
+        let outputHandle = outputPipe.fileHandleForReading
+        let errorHandle = errorPipe.fileHandleForReading
+        
         try process.run()
+        
+        let outputTask = Task.detached {
+            outputHandle.readDataToEndOfFile()
+        }
+        let errorTask = Task.detached {
+            errorHandle.readDataToEndOfFile()
+        }
+        
+        let outputData = await outputTask.value
+        let errorData = await errorTask.value
         process.waitUntilExit()
         
-        let outputData = try? outputPipe.fileHandleForReading.readToEnd()
-        let errorData = try? errorPipe.fileHandleForReading.readToEnd()
-        
-        let outputStr = outputData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-        let errorStr = errorData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let outputStr = String(data: outputData, encoding: .utf8) ?? ""
+        let errorStr = String(data: errorData, encoding: .utf8) ?? ""
         
         return ProcessResult(exitCode: Int(process.terminationStatus), output: outputStr, error: errorStr)
     }
