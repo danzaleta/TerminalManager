@@ -32,31 +32,8 @@ class SettingsViewModel: ObservableObject {
 }
 
 struct SettingsView: View {
-    @StateObject private var viewModel = SettingsViewModel()
-    
     var body: some View {
-        VStack(alignment: .leading) {
-            Text("TerminalManager")
-                .font(.title)
-                .padding(.bottom)
-            
-            ScrollView {
-                Text(viewModel.outputText)
-                    .font(.system(.body, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            
-            HStack {
-                Button("Run brew update") {
-                    viewModel.runUpdate()
-                }
-                Spacer()
-            }
-        }
-        .padding()
-        .frame(width: 500, height: 400)
-        .task {
-            await viewModel.fetchList()
-        }
+        PackagesView()
+            .frame(width: 600, height: 500)
     }
 }
