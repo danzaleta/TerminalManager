@@ -1,7 +1,38 @@
 import SwiftUI
+import Combine
+
+@MainActor
+class SettingsViewModel: ObservableObject {
+    @Published var outputText: String = "Fetching brew list..."
+    
+    func fetchList() async {
+        do {
+            let result = try await BrewQueue.shared.execute(arguments: ["list", "--formula"])
+            self.outputText = "Formulae:\n" + result.output
+        } catch {
+            self.outputText = "Error: \(error.localizedDescription)"
+        }
+    }
+    
+    func runUpdate() {
+        self.outputText = "Updating..."
+        Task {
+            do {
+                let stream = await BrewQueue.shared.stream(arguments: ["update"])
+                var newText = ""
+                for try await line in stream {
+                    newText += line
+                    self.outputText = newText
+                }
+            } catch {
+                self.outputText += "\nError: \(error)"
+            }
+        }
+    }
+}
 
 struct SettingsView: View {
-    @State private var outputText: String = "Fetching brew list..."
+    @StateObject private var viewModel = SettingsViewModel()
     
     var body: some View {
         VStack(alignment: .leading) {
@@ -10,30 +41,14 @@ struct SettingsView: View {
                 .padding(.bottom)
             
             ScrollView {
-                Text(outputText)
+                Text(viewModel.outputText)
                     .font(.system(.body, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             
             HStack {
                 Button("Run brew update") {
-                    outputText = "Updating..."
-                    Task {
-                        do {
-                            let stream = BrewQueue.shared.stream(arguments: ["update"])
-                            var newText = ""
-                            for try await line in stream {
-                                newText += line
-                                await MainActor.run {
-                                    self.outputText = newText
-                                }
-                            }
-                        } catch {
-                            await MainActor.run {
-                                self.outputText += "\nError: \(error)"
-                            }
-                        }
-                    }
+                    viewModel.runUpdate()
                 }
                 Spacer()
             }
@@ -41,12 +56,7 @@ struct SettingsView: View {
         .padding()
         .frame(width: 500, height: 400)
         .task {
-            do {
-                let result = try await BrewQueue.shared.execute(arguments: ["list", "--formula"])
-                outputText = "Formulae:\n" + result.output
-            } catch {
-                outputText = "Error: \(error.localizedDescription)"
-            }
+            await viewModel.fetchList()
         }
     }
 }

@@ -17,7 +17,6 @@ public struct BrewPackage: Codable, Identifiable {
     public var totalSize: String? {
         // e.g. "installed": [{"installed_as_dependency": false, "installed_on_request": true, "poured_from_bottle": true, "time": 1690000000, "runtime_dependencies": [], "installed_folder": "/opt/homebrew/Cellar/...", "built_as_bottle": true, "installed_size": 123456}]
         // We will sum the sizes
-        let bytes = installed.reduce(0) { $0 + ($1.built_as_bottle ? 0 : 0) } // We will calculate this more accurately later, json output is actually different
         return nil
     }
 }
@@ -30,6 +29,7 @@ public struct BrewInstalled: Codable {
     public let version: String
     public let installed_on_request: Bool
     public let installed_as_dependency: Bool
+    public let installed_size: Int?
 }
 
 public struct BrewCask: Codable, Identifiable {

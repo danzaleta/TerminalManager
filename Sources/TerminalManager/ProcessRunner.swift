@@ -1,12 +1,12 @@
 import Foundation
 
-public struct ProcessResult {
+public struct ProcessResult: Sendable {
     public let exitCode: Int
     public let output: String
     public let error: String
 }
 
-public actor ProcessRunner {
+public struct ProcessRunner {
     public init() {}
     
     public func runProcess(
