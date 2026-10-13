@@ -41,8 +41,6 @@ public struct ProcessRunner {
         let outputHandle = outputPipe.fileHandleForReading
         let errorHandle = errorPipe.fileHandleForReading
         
-        try process.run()
-        
         let outputTask = Task.detached {
             outputHandle.readDataToEndOfFile()
         }
@@ -50,9 +48,19 @@ public struct ProcessRunner {
             errorHandle.readDataToEndOfFile()
         }
         
+        await withCheckedContinuation { continuation in
+            process.terminationHandler = { _ in
+                continuation.resume()
+            }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume()
+            }
+        }
+        
         let outputData = await outputTask.value
         let errorData = await errorTask.value
-        process.waitUntilExit()
         
         let outputStr = String(data: outputData, encoding: .utf8) ?? ""
         let errorStr = String(data: errorData, encoding: .utf8) ?? ""

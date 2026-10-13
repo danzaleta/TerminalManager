@@ -9,6 +9,7 @@ class PackagesViewModel: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var isUpdating: Bool = false
     @Published var outputLog: String = ""
+    @Published var showLog: Bool = false
     @Published var showingImport = false
     @Published var backupData: BackupData?
     @Published var itemToUninstall: PackageDisplayItem? = nil
@@ -61,6 +62,7 @@ class PackagesViewModel: ObservableObject {
     
     func updatePackages() {
         self.isUpdating = true
+        self.showLog = true
         self.outputLog = "Starting brew update & upgrade...\n"
         Task {
             do {
@@ -83,6 +85,7 @@ class PackagesViewModel: ObservableObject {
     
     func uninstall(item: PackageDisplayItem) {
         self.isUpdating = true
+        self.showLog = true
         self.outputLog = "Uninstalling \(item.name) (\(item.id))...\n"
         Task {
             do {
@@ -171,14 +174,37 @@ struct PackagesView: View {
             
             Divider()
             
-            if viewModel.isUpdating {
-                ScrollView {
-                    Text(viewModel.outputLog)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding()
+            if viewModel.showLog {
+                VStack(spacing: 4) {
+                    HStack {
+                        Text("Process Log")
+                            .font(.caption)
+                            .bold()
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        if !viewModel.isUpdating {
+                            Button("Close Log") {
+                                viewModel.showLog = false
+                            }
+                            .font(.caption)
+                            .buttonStyle(.borderless)
+                        } else {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 4)
+                    
+                    ScrollView {
+                        Text(viewModel.outputLog)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal)
+                            .padding(.bottom, 6)
+                    }
+                    .frame(maxHeight: 140)
                 }
-                .frame(maxHeight: 140)
                 .background(Color(NSColor.textBackgroundColor))
                 Divider()
             }
