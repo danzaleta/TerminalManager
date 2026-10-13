@@ -4,13 +4,15 @@ import Combine
 
 @MainActor
 class PackagesViewModel: ObservableObject {
-    @Published var formulae: [(package: BrewPackage, totalSizeStr: String)] = []
-    @Published var casks: [(cask: BrewCask, totalSizeStr: String)] = []
+    @Published var formulae: [PackageDisplayItem] = []
+    @Published var casks: [PackageDisplayItem] = []
     @Published var isLoading: Bool = false
     @Published var isUpdating: Bool = false
     @Published var outputLog: String = ""
     @Published var showingImport = false
     @Published var backupData: BackupData?
+    @Published var itemToUninstall: PackageDisplayItem? = nil
+    @Published var showingUninstallConfirm = false
     
     func fetchPackages() async {
         self.isLoading = true
@@ -21,21 +23,33 @@ class PackagesViewModel: ObservableObject {
                 let graph = DependencyGraph(response: response)
                 
                 // Formulae
-                var formulaItems = [(package: BrewPackage, totalSizeStr: String)]()
+                var formulaItems = [PackageDisplayItem]()
                 for pkg in response.formulae where pkg.installed.contains(where: { $0.installed_on_request == true }) {
                     var visited = Set<String>()
                     let totalBytes = graph.sizeOf(package: pkg.name, visited: &visited)
-                    formulaItems.append((package: pkg, totalSizeStr: graph.formattedSize(bytes: totalBytes)))
+                    formulaItems.append(PackageDisplayItem(
+                        id: pkg.name,
+                        name: pkg.name,
+                        description: pkg.desc ?? "No description",
+                        sizeString: graph.formattedSize(bytes: totalBytes),
+                        isCask: false
+                    ))
                 }
-                self.formulae = formulaItems.sorted { a, b in a.package.name < b.package.name }
+                self.formulae = formulaItems.sorted { $0.name < $1.name }
                 
                 // Casks
-                var caskItems = [(cask: BrewCask, totalSizeStr: String)]()
+                var caskItems = [PackageDisplayItem]()
                 for cask in response.casks where cask.installed != nil {
                     let totalBytes = graph.sizeOf(cask: cask)
-                    caskItems.append((cask: cask, totalSizeStr: graph.formattedSize(bytes: totalBytes)))
+                    caskItems.append(PackageDisplayItem(
+                        id: cask.token,
+                        name: cask.displayName,
+                        description: cask.desc ?? cask.token,
+                        sizeString: graph.formattedSize(bytes: totalBytes),
+                        isCask: true
+                    ))
                 }
-                self.casks = caskItems.sorted { a, b in a.cask.displayName < b.cask.displayName }
+                self.casks = caskItems.sorted { $0.name < $1.name }
             }
         } catch {
             self.outputLog = "Error fetching packages: \(error)"
@@ -67,14 +81,47 @@ class PackagesViewModel: ObservableObject {
         }
     }
     
+    func uninstall(item: PackageDisplayItem) {
+        self.isUpdating = true
+        self.outputLog = "Uninstalling \(item.name) (\(item.id))...\n"
+        Task {
+            do {
+                var args = ["uninstall"]
+                if item.isCask {
+                    args.append("--cask")
+                }
+                args.append(item.id)
+                
+                let stream = await BrewQueue.shared.stream(arguments: args)
+                for try await line in stream {
+                    self.outputLog += line
+                }
+                
+                if !item.isCask {
+                    self.outputLog += "\nCleaning up orphaned dependencies (brew autoremove)...\n"
+                    let streamAutoremove = await BrewQueue.shared.stream(arguments: ["autoremove"])
+                    for try await line in streamAutoremove {
+                        self.outputLog += line
+                    }
+                }
+                
+                self.outputLog += "\nUninstallation finished successfully.\n"
+                await fetchPackages()
+            } catch {
+                self.outputLog += "\nError during uninstallation: \(error.localizedDescription)\n"
+            }
+            self.isUpdating = false
+        }
+    }
+    
     func exportConfig() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "TerminalManager_Backup.json"
         
         if panel.runModal() == .OK, let url = panel.url {
-            let formulaNames = self.formulae.map { $0.package.name }
-            let caskTokens = self.casks.map { $0.cask.token }
+            let formulaNames = self.formulae.map { $0.id }
+            let caskTokens = self.casks.map { $0.id }
             do {
                 try BackupManager.export(formulae: formulaNames, casks: caskTokens, to: url)
             } catch {
@@ -131,7 +178,7 @@ struct PackagesView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding()
                 }
-                .frame(maxHeight: 130)
+                .frame(maxHeight: 140)
                 .background(Color(NSColor.textBackgroundColor))
                 Divider()
             }
@@ -149,42 +196,16 @@ struct PackagesView: View {
                 List {
                     if !viewModel.casks.isEmpty {
                         Section("GUI Terminal Apps (Casks)") {
-                            ForEach(viewModel.casks, id: \.cask.id) { item in
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(item.cask.displayName).font(.subheadline).bold()
-                                        Text(item.cask.desc ?? item.cask.token)
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    Text(item.totalSizeStr)
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding(.vertical, 2)
+                            ForEach(viewModel.casks) { item in
+                                packageRow(item: item)
                             }
                         }
                     }
                     
                     if !viewModel.formulae.isEmpty {
                         Section("CLI Packages & Dependencies (Formulae)") {
-                            ForEach(viewModel.formulae, id: \.package.id) { item in
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(item.package.name).font(.subheadline).bold()
-                                        Text(item.package.desc ?? "No description")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    Text(item.totalSizeStr)
-                                        .font(.caption.monospacedDigit())
-                                        .foregroundColor(.secondary)
-                                }
-                                .padding(.vertical, 2)
+                            ForEach(viewModel.formulae) { item in
+                                packageRow(item: item)
                             }
                         }
                     }
@@ -199,5 +220,58 @@ struct PackagesView: View {
                 ImportChecklistView(backup: backup, isPresented: $viewModel.showingImport)
             }
         }
+        .alert("Uninstall \(viewModel.itemToUninstall?.name ?? "")?", isPresented: $viewModel.showingUninstallConfirm) {
+            Button("Cancel", role: .cancel) {
+                viewModel.itemToUninstall = nil
+            }
+            Button("Uninstall", role: .destructive) {
+                if let item = viewModel.itemToUninstall {
+                    viewModel.uninstall(item: item)
+                    viewModel.itemToUninstall = nil
+                }
+            }
+        } message: {
+            if let item = viewModel.itemToUninstall {
+                Text("Are you sure you want to uninstall '\(item.name)'? This will free approximately \(item.sizeString) of disk space.")
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func packageRow(item: PackageDisplayItem) -> some View {
+        HStack {
+            Image(systemName: item.isCask ? "macwindow" : "terminal")
+                .foregroundColor(.accentColor)
+                .frame(width: 20)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name)
+                    .font(.subheadline)
+                    .bold()
+                Text(item.description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            
+            Spacer()
+            
+            Text(item.sizeString)
+                .font(.caption.monospacedDigit())
+                .foregroundColor(.secondary)
+                .padding(.trailing, 8)
+            
+            Button(role: .destructive) {
+                viewModel.itemToUninstall = item
+                viewModel.showingUninstallConfirm = true
+            } label: {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+            .buttonStyle(.plain)
+            .help("Uninstall \(item.name)")
+            .disabled(viewModel.isUpdating)
+        }
+        .padding(.vertical, 3)
     }
 }

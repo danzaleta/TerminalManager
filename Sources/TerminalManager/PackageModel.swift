@@ -44,3 +44,19 @@ public struct BrewCask: Codable, Identifiable {
         name?.first ?? token
     }
 }
+
+public struct PackageDisplayItem: Identifiable, Sendable {
+    public let id: String
+    public let name: String
+    public let description: String
+    public let sizeString: String
+    public let isCask: Bool
+    
+    public init(id: String, name: String, description: String, sizeString: String, isCask: Bool) {
+        self.id = id
+        self.name = name
+        self.description = description
+        self.sizeString = sizeString
+        self.isCask = isCask
+    }
+}

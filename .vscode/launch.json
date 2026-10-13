@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:TerminalManager}",
+            "name": "Debug TerminalManager",
+            "target": "TerminalManager",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug TerminalManager"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:TerminalManager}",
+            "name": "Release TerminalManager",
+            "target": "TerminalManager",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release TerminalManager"
+        }
+    ]
+}

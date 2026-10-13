@@ -38,11 +38,21 @@ public struct DependencyGraph {
     
     public func sizeOf(cask: BrewCask) -> Int {
         let prefix = ProcessInfo.processInfo.environment["HOMEBREW_PREFIX"] ?? "/opt/homebrew"
-        let possiblePaths = [
+        var possiblePaths = [
             "/Applications/\(cask.displayName).app",
             "/Applications/\(cask.token).app",
             "\(prefix)/Caskroom/\(cask.token)"
         ]
+        
+        if let files = try? FileManager.default.contentsOfDirectory(atPath: "/Applications") {
+            for file in files where file.hasSuffix(".app") {
+                let base = String(file.dropLast(4))
+                if base.localizedCaseInsensitiveContains(cask.token) || cask.token.localizedCaseInsensitiveContains(base) || base.localizedCaseInsensitiveContains(cask.displayName) {
+                    possiblePaths.insert("/Applications/\(file)", at: 0)
+                }
+            }
+        }
+        
         for path in possiblePaths {
             if FileManager.default.fileExists(atPath: path) {
                 let url = URL(fileURLWithPath: path)
