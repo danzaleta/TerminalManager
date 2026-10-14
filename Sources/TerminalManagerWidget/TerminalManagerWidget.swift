@@ -1,5 +1,6 @@
 import WidgetKit
 import SwiftUI
+import os
 
 struct TerminalWidgetEntry: TimelineEntry {
     let date: Date
@@ -160,7 +161,6 @@ struct TerminalManagerWidgetEntryView: View {
     }
 }
 
-@main
 struct TerminalManagerWidget: Widget {
     let kind: String = "TerminalManagerWidget"
 
@@ -171,5 +171,12 @@ struct TerminalManagerWidget: Widget {
         .configurationDisplayName("Terminal Manager")
         .description("Monitor disk usage and installed packages.")
         .supportedFamilies([.systemSmall, .systemMedium])
+    }
+}
+
+@main
+struct TerminalManagerWidgetBundle: WidgetBundle {
+    var body: some Widget {
+        TerminalManagerWidget()
     }
 }

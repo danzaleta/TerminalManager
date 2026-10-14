@@ -20,6 +20,9 @@ let package = Package(
             swiftSettings: [
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-e", "-Xlinker", "_NSExtensionMain"])
+            ]
         ),
         .testTarget(
             name: "TerminalManagerTests",

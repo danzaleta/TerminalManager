@@ -45,20 +45,19 @@ codesign --force -s - "${APP_DIR}"
 
 echo "App Bundle created at ${APP_DIR}"
 
-# Copy to ~/Applications and register widget
-if [ -d "$HOME/Applications" ]; then
-    echo "Updating ~/Applications/${APP_NAME}.app..."
-    rm -rf "$HOME/Applications/${APP_NAME}.app"
-    cp -r "${APP_DIR}" "$HOME/Applications/"
-    
-    echo "Registering with LaunchServices..."
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$HOME/Applications/${APP_NAME}.app" || true
-    
-    echo "Registering Desktop Widget with macOS..."
-    pluginkit -a "$HOME/Applications/${APP_NAME}.app/Contents/PlugIns/${WIDGET_NAME}.appex" || true
-    
-    echo "Flushing WidgetKit cache..."
-    killall chronod 2>/dev/null || true
-    
-    echo "App & Widget available in ~/Applications/${APP_NAME}.app"
-fi
+# Copy to /Applications and register widget
+echo "Updating /Applications/${APP_NAME}.app..."
+rm -rf "/Applications/${APP_NAME}.app"
+cp -r "${APP_DIR}" "/Applications/"
+
+echo "Registering with LaunchServices..."
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/${APP_NAME}.app" || true
+
+echo "Registering Desktop Widget with macOS..."
+pluginkit -a "/Applications/${APP_NAME}.app/Contents/PlugIns/${WIDGET_NAME}.appex" || true
+
+echo "Flushing WidgetKit cache..."
+killall chronod 2>/dev/null || true
+killall NotificationCenter 2>/dev/null || true
+
+echo "App & Widget available in /Applications/${APP_NAME}.app"
