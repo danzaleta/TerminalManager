@@ -15,6 +15,12 @@ let package = Package(
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
         ),
+        .executableTarget(
+            name: "TerminalManagerWidget",
+            swiftSettings: [
+                .enableUpcomingFeature("ApproachableConcurrency"),
+            ],
+        ),
         .testTarget(
             name: "TerminalManagerTests",
             dependencies: ["TerminalManager"],

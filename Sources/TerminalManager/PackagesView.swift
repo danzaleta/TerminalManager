@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import WidgetKit
 
 @MainActor
 class PackagesViewModel: ObservableObject {
@@ -51,6 +52,25 @@ class PackagesViewModel: ObservableObject {
                     ))
                 }
                 self.casks = caskItems.sorted { $0.name < $1.name }
+                
+                // Save metrics for Desktop Widget
+                var totalAllBytes: Int64 = 0
+                for pkg in response.formulae where pkg.installed.contains(where: { $0.installed_on_request == true }) {
+                    var v = Set<String>()
+                    totalAllBytes += Int64(graph.sizeOf(package: pkg.name, visited: &v))
+                }
+                for cask in response.casks where cask.installed != nil {
+                    totalAllBytes += Int64(graph.sizeOf(cask: cask))
+                }
+                let widgetData = WidgetData(
+                    appsCount: self.casks.count,
+                    packagesCount: self.formulae.count,
+                    totalBytes: totalAllBytes,
+                    formattedDiskSpace: graph.formattedSize(bytes: Int(totalAllBytes)),
+                    lastUpdated: Date()
+                )
+                widgetData.save()
+                WidgetCenter.shared.reloadAllTimelines()
             }
         } catch {
             self.outputLog = "Error fetching packages: \(error)"
