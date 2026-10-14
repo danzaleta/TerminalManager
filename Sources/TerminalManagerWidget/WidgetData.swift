@@ -30,19 +30,27 @@ public struct WidgetData: Codable, Sendable {
         return dir.appendingPathComponent("widget_data.json")
     }
     
+    public static var fallbackURL: URL {
+        return URL(fileURLWithPath: "/private/tmp/terminal_manager_widget.json")
+    }
+    
     public static func load() -> WidgetData? {
-        let url = storageURL
-        guard let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(WidgetData.self, from: data) else {
-            return nil
+        let decoder = JSONDecoder()
+        if let data = try? Data(contentsOf: storageURL),
+           let decoded = try? decoder.decode(WidgetData.self, from: data) {
+            return decoded
         }
-        return decoded
+        if let data = try? Data(contentsOf: fallbackURL),
+           let decoded = try? decoder.decode(WidgetData.self, from: data) {
+            return decoded
+        }
+        return nil
     }
     
     public func save() {
-        let url = Self.storageURL
         if let data = try? JSONEncoder().encode(self) {
-            try? data.write(to: url)
+            try? data.write(to: Self.storageURL)
+            try? data.write(to: Self.fallbackURL)
         }
     }
 }

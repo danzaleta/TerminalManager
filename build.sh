@@ -37,11 +37,11 @@ echo "Assembling Widget Extension..."
 cp "${BUILD_DIR}/${WIDGET_NAME}" "${WIDGET_MACOS_DIR}/"
 cp "TerminalManagerWidget-Info.plist" "${WIDGET_CONTENTS_DIR}/Info.plist"
 
-echo "Code signing Widget Extension..."
-codesign --force --deep -s - "${WIDGET_APPEX_DIR}"
+echo "Code signing Widget Extension with Sandbox entitlements..."
+codesign --force -s - --entitlements "TerminalManagerWidget.entitlements" "${WIDGET_APPEX_DIR}"
 
 echo "Code signing Main App Bundle..."
-codesign --force --deep -s - "${APP_DIR}"
+codesign --force -s - "${APP_DIR}"
 
 echo "App Bundle created at ${APP_DIR}"
 
@@ -56,6 +56,9 @@ if [ -d "$HOME/Applications" ]; then
     
     echo "Registering Desktop Widget with macOS..."
     pluginkit -a "$HOME/Applications/${APP_NAME}.app/Contents/PlugIns/${WIDGET_NAME}.appex" || true
+    
+    echo "Flushing WidgetKit cache..."
+    killall chronod 2>/dev/null || true
     
     echo "App & Widget available in ~/Applications/${APP_NAME}.app"
 fi
