@@ -50,13 +50,15 @@ public struct PackageDisplayItem: Identifiable, Sendable {
     public let name: String
     public let description: String
     public let sizeString: String
+    public let rawBytes: Int
     public let isCask: Bool
     
-    public init(id: String, name: String, description: String, sizeString: String, isCask: Bool) {
+    public init(id: String, name: String, description: String, sizeString: String, rawBytes: Int = 0, isCask: Bool) {
         self.id = id
         self.name = name
         self.description = description
         self.sizeString = sizeString
+        self.rawBytes = rawBytes
         self.isCask = isCask
     }
 }

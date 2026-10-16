@@ -3,81 +3,143 @@ import SwiftUI
 import Combine
 import WidgetKit
 
+enum PackageFilterType: String, CaseIterable, Identifiable {
+    case all = "All"
+    case casks = "GUI Casks"
+    case formulae = "Formulae"
+    
+    var id: String { rawValue }
+}
+
+enum PackageSortType: String, CaseIterable, Identifiable {
+    case name = "Name"
+    case size = "Disk Size"
+    
+    var id: String { rawValue }
+}
+
 @MainActor
-class PackagesViewModel: ObservableObject {
+final class PackagesViewModel: ObservableObject {
     @Published var formulae: [PackageDisplayItem] = []
     @Published var casks: [PackageDisplayItem] = []
     @Published var isLoading: Bool = false
     @Published var isUpdating: Bool = false
     @Published var outputLog: String = ""
     @Published var showLog: Bool = false
-    @Published var showingImport = false
+    @Published var showingImport: Bool = false
     @Published var backupData: BackupData?
     @Published var itemToUninstall: PackageDisplayItem? = nil
-    @Published var showingUninstallConfirm = false
+    @Published var showingUninstallConfirm: Bool = false
+    
+    // Filtering & Sorting
+    @Published var searchText: String = ""
+    @Published var selectedFilter: PackageFilterType = .all
+    @Published var selectedSort: PackageSortType = .name
+    
+    var filteredCasks: [PackageDisplayItem] {
+        guard selectedFilter == .all || selectedFilter == .casks else { return [] }
+        var list = casks
+        if !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+            let query = searchText.lowercased()
+            list = list.filter { $0.name.lowercased().contains(query) || $0.description.lowercased().contains(query) || $0.id.lowercased().contains(query) }
+        }
+        switch selectedSort {
+        case .name:
+            return list.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        case .size:
+            return list.sorted { $0.rawBytes > $1.rawBytes }
+        }
+    }
+    
+    var filteredFormulae: [PackageDisplayItem] {
+        guard selectedFilter == .all || selectedFilter == .formulae else { return [] }
+        var list = formulae
+        if !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
+            let query = searchText.lowercased()
+            list = list.filter { $0.name.lowercased().contains(query) || $0.description.lowercased().contains(query) || $0.id.lowercased().contains(query) }
+        }
+        switch selectedSort {
+        case .name:
+            return list.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        case .size:
+            return list.sorted { $0.rawBytes > $1.rawBytes }
+        }
+    }
     
     func fetchPackages() async {
         self.isLoading = true
         do {
             let result = try await BrewQueue.shared.execute(arguments: ["info", "--json=v2", "--installed"])
-            if let data = result.output.data(using: .utf8) {
+            guard result.exitCode == 0, let data = result.output.data(using: .utf8) else {
+                throw NSError(domain: "BrewQueue", code: result.exitCode, userInfo: [NSLocalizedDescriptionKey: result.error.isEmpty ? "Failed to query Homebrew packages." : result.error])
+            }
+            
+            // Heavy parsing and disk measurement on background thread
+            let (formulaItems, caskItems, widgetData) = try await Task.detached(priority: .userInitiated) {
                 let response = try JSONDecoder().decode(BrewInfoResponse.self, from: data)
                 let graph = DependencyGraph(response: response)
                 
-                // Formulae
-                var formulaItems = [PackageDisplayItem]()
-                for pkg in response.formulae where pkg.installed.contains(where: { $0.installed_on_request == true }) {
+                // Formulae leaves (installed on request)
+                var fItems = [PackageDisplayItem]()
+                let leaves = response.formulae.filter { pkg in
+                    pkg.installed.contains(where: { $0.installed_on_request == true })
+                }
+                
+                for pkg in leaves {
                     var visited = Set<String>()
                     let totalBytes = graph.sizeOf(package: pkg.name, visited: &visited)
-                    formulaItems.append(PackageDisplayItem(
+                    fItems.append(PackageDisplayItem(
                         id: pkg.name,
                         name: pkg.name,
                         description: pkg.desc ?? "No description",
                         sizeString: graph.formattedSize(bytes: totalBytes),
+                        rawBytes: totalBytes,
                         isCask: false
                     ))
                 }
-                self.formulae = formulaItems.sorted { $0.name < $1.name }
                 
                 // Casks
-                var caskItems = [PackageDisplayItem]()
-                for cask in response.casks where cask.installed != nil {
+                var cItems = [PackageDisplayItem]()
+                let installedCasks = response.casks.filter { $0.installed != nil }
+                for cask in installedCasks {
                     let totalBytes = graph.sizeOf(cask: cask)
-                    caskItems.append(PackageDisplayItem(
+                    cItems.append(PackageDisplayItem(
                         id: cask.token,
                         name: cask.displayName,
                         description: cask.desc ?? cask.token,
                         sizeString: graph.formattedSize(bytes: totalBytes),
+                        rawBytes: totalBytes,
                         isCask: true
                     ))
                 }
-                self.casks = caskItems.sorted { $0.name < $1.name }
                 
-                // Save metrics for Desktop Widget
-                var totalAllBytes: Int64 = 0
-                for pkg in response.formulae where pkg.installed.contains(where: { $0.installed_on_request == true }) {
-                    var v = Set<String>()
-                    totalAllBytes += Int64(graph.sizeOf(package: pkg.name, visited: &v))
-                }
-                for cask in response.casks where cask.installed != nil {
-                    totalAllBytes += Int64(graph.sizeOf(cask: cask))
-                }
-                let widgetData = WidgetData(
-                    appsCount: self.casks.count,
-                    packagesCount: self.formulae.count,
+                // True aggregate physical size without duplicate counting
+                let totalAllBytes = graph.totalPhysicalBytes(
+                    leaves: leaves.map { $0.name },
+                    casks: installedCasks
+                )
+                
+                let wData = WidgetData(
+                    appsCount: cItems.count,
+                    packagesCount: fItems.count,
                     totalBytes: totalAllBytes,
                     formattedDiskSpace: graph.formattedSize(bytes: Int(totalAllBytes)),
                     lastUpdated: Date()
                 )
-                widgetData.save()
-                WidgetCenter.shared.reloadAllTimelines()
-            }
+                
+                return (fItems, cItems, wData)
+            }.value
+            
+            self.formulae = formulaItems
+            self.casks = caskItems
+            widgetData.save()
+            WidgetCenter.shared.reloadAllTimelines()
         } catch {
-            self.outputLog = "Error fetching packages: \(error)"
-            self.isUpdating = true
-            print("Error: \(error)")
+            self.outputLog = "Error fetching packages: \(error.localizedDescription)"
+            self.showLog = true
         }
         self.isLoading = false
+        self.isUpdating = false
     }
     
     func updatePackages() {
@@ -90,14 +152,15 @@ class PackagesViewModel: ObservableObject {
                 for try await line in streamUpdate {
                     self.outputLog += line
                 }
-                self.outputLog += "\nUpdating packages & casks...\n"
+                self.outputLog += "\nUpdating packages & casks (brew upgrade)...\n"
                 let streamUpgrade = await BrewQueue.shared.stream(arguments: ["upgrade"])
                 for try await line in streamUpgrade {
                     self.outputLog += line
                 }
+                self.outputLog += "\nUpdate finished successfully.\n"
                 await fetchPackages()
             } catch {
-                self.outputLog += "\nError: \(error)"
+                self.outputLog += "\nError: \(error.localizedDescription)\n"
             }
             self.isUpdating = false
         }
@@ -137,6 +200,35 @@ class PackagesViewModel: ObservableObject {
         }
     }
     
+    func importPackages(toInstallFormulae: [String], toInstallCasks: [String]) {
+        self.isUpdating = true
+        self.showLog = true
+        self.outputLog = "Starting import installation...\n"
+        Task {
+            do {
+                if !toInstallCasks.isEmpty {
+                    self.outputLog += "Installing casks: \(toInstallCasks.joined(separator: ", "))...\n"
+                    let streamCasks = await BrewQueue.shared.stream(arguments: ["install", "--cask"] + toInstallCasks)
+                    for try await line in streamCasks {
+                        self.outputLog += line
+                    }
+                }
+                if !toInstallFormulae.isEmpty {
+                    self.outputLog += "\nInstalling formulae: \(toInstallFormulae.joined(separator: ", "))...\n"
+                    let streamFormulae = await BrewQueue.shared.stream(arguments: ["install"] + toInstallFormulae)
+                    for try await line in streamFormulae {
+                        self.outputLog += line
+                    }
+                }
+                self.outputLog += "\nImport installation completed.\n"
+                await fetchPackages()
+            } catch {
+                self.outputLog += "\nError during import installation: \(error.localizedDescription)\n"
+            }
+            self.isUpdating = false
+        }
+    }
+    
     func exportConfig() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.json]
@@ -148,7 +240,8 @@ class PackagesViewModel: ObservableObject {
             do {
                 try BackupManager.export(formulae: formulaNames, casks: caskTokens, to: url)
             } catch {
-                print("Export error: \(error)")
+                self.outputLog = "Export error: \(error.localizedDescription)"
+                self.showLog = true
             }
         }
     }
@@ -164,7 +257,8 @@ class PackagesViewModel: ObservableObject {
                 self.backupData = data
                 self.showingImport = true
             } catch {
-                print("Import error: \(error)")
+                self.outputLog = "Import error: \(error.localizedDescription)"
+                self.showLog = true
             }
         }
     }
@@ -175,35 +269,98 @@ struct PackagesView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Installed Applications & Packages")
-                    .font(.headline)
+            // Header Bar
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Terminal Manager")
+                        .font(.headline)
+                    Text("\(viewModel.casks.count) GUI Casks · \(viewModel.formulae.count) Formulae Leaves")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                
                 Spacer()
-                Button("Import") {
+                
+                Button {
                     viewModel.importConfig()
+                } label: {
+                    Label("Import", systemImage: "square.and.arrow.down")
                 }
-                Button("Export") {
+                .disabled(viewModel.isUpdating)
+                
+                Button {
                     viewModel.exportConfig()
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.up")
                 }
-                Button(viewModel.isUpdating ? "Updating..." : "Update All") {
+                .disabled(viewModel.isUpdating)
+                
+                Button {
                     viewModel.updatePackages()
+                } label: {
+                    Label(viewModel.isUpdating ? "Updating..." : "Update All", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .disabled(viewModel.isUpdating)
             }
-            .padding()
+            .padding(.horizontal)
+            .padding(.vertical, 10)
             
             Divider()
             
+            // Search, Filter & Sort Controls
+            HStack(spacing: 10) {
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("Search packages or apps...", text: $viewModel.searchText)
+                        .textFieldStyle(.plain)
+                    if !viewModel.searchText.isEmpty {
+                        Button {
+                            viewModel.searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(Color(NSColor.controlBackgroundColor))
+                .cornerRadius(6)
+                
+                Picker("", selection: $viewModel.selectedFilter) {
+                    ForEach(PackageFilterType.allCases) { filter in
+                        Text(filter.rawValue).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 220)
+                
+                Picker("Sort", selection: $viewModel.selectedSort) {
+                    ForEach(PackageSortType.allCases) { sort in
+                        Text(sort.rawValue).tag(sort)
+                    }
+                }
+                .frame(width: 130)
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 8)
+            .background(Color(NSColor.windowBackgroundColor))
+            
+            Divider()
+            
+            // Process Log Console
             if viewModel.showLog {
                 VStack(spacing: 4) {
                     HStack {
-                        Text("Process Log")
+                        Text("Process Output Console")
                             .font(.caption)
                             .bold()
                             .foregroundColor(.secondary)
                         Spacer()
                         if !viewModel.isUpdating {
-                            Button("Close Log") {
+                            Button("Close Console") {
                                 viewModel.showLog = false
                             }
                             .font(.caption)
@@ -229,28 +386,34 @@ struct PackagesView: View {
                 Divider()
             }
             
+            // Main Package List
             if viewModel.isLoading {
                 Spacer()
-                ProgressView("Auditing packages and sizes...")
+                ProgressView("Auditing packages and disk sizes...")
                 Spacer()
-            } else if viewModel.formulae.isEmpty && viewModel.casks.isEmpty {
+            } else if viewModel.filteredCasks.isEmpty && viewModel.filteredFormulae.isEmpty {
                 Spacer()
-                Text("No packages found.")
-                    .foregroundColor(.secondary)
+                VStack(spacing: 6) {
+                    Image(systemName: "archivebox")
+                        .font(.largeTitle)
+                        .foregroundColor(.secondary)
+                    Text("No packages match your criteria.")
+                        .foregroundColor(.secondary)
+                }
                 Spacer()
             } else {
                 List {
-                    if !viewModel.casks.isEmpty {
-                        Section("GUI Terminal Apps (Casks)") {
-                            ForEach(viewModel.casks) { item in
+                    if !viewModel.filteredCasks.isEmpty {
+                        Section("GUI Terminal Apps & Casks (\(viewModel.filteredCasks.count))") {
+                            ForEach(viewModel.filteredCasks) { item in
                                 packageRow(item: item)
                             }
                         }
                     }
                     
-                    if !viewModel.formulae.isEmpty {
-                        Section("CLI Packages & Dependencies (Formulae)") {
-                            ForEach(viewModel.formulae) { item in
+                    if !viewModel.filteredFormulae.isEmpty {
+                        Section("CLI Packages & Dependencies (\(viewModel.filteredFormulae.count))") {
+                            ForEach(viewModel.filteredFormulae) { item in
                                 packageRow(item: item)
                             }
                         }
@@ -263,7 +426,15 @@ struct PackagesView: View {
         }
         .sheet(isPresented: $viewModel.showingImport) {
             if let backup = viewModel.backupData {
-                ImportChecklistView(backup: backup, isPresented: $viewModel.showingImport)
+                ImportChecklistView(
+                    backup: backup,
+                    installedFormulae: Set(viewModel.formulae.map { $0.id }),
+                    installedCasks: Set(viewModel.casks.map { $0.id }),
+                    isPresented: $viewModel.showingImport,
+                    onInstall: { fList, cList in
+                        viewModel.importPackages(toInstallFormulae: fList, toInstallCasks: cList)
+                    }
+                )
             }
         }
         .alert("Uninstall \(viewModel.itemToUninstall?.name ?? "")?", isPresented: $viewModel.showingUninstallConfirm) {

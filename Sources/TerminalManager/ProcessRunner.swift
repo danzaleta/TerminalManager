@@ -19,6 +19,10 @@ public struct ProcessRunner {
         process.executableURL = executableURL
         process.arguments = arguments
         var currentEnv = ProcessInfo.processInfo.environment
+        currentEnv["NONINTERACTIVE"] = "1"
+        currentEnv["CI"] = "1"
+        currentEnv["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+        currentEnv["HOMEBREW_NO_ENV_HINTS"] = "1"
         if let env = environment {
             currentEnv.merge(env) { (_, new) in new }
         }
@@ -29,6 +33,7 @@ public struct ProcessRunner {
             currentEnv["PATH"] = additionalPath
         }
         process.environment = currentEnv
+        process.standardInput = FileHandle.nullDevice
         if let cwd = workingDirectory {
             process.currentDirectoryURL = cwd
         }
@@ -78,6 +83,10 @@ public struct ProcessRunner {
             process.executableURL = executableURL
             process.arguments = arguments
             var currentEnv = ProcessInfo.processInfo.environment
+            currentEnv["NONINTERACTIVE"] = "1"
+            currentEnv["CI"] = "1"
+            currentEnv["HOMEBREW_NO_AUTO_UPDATE"] = "1"
+            currentEnv["HOMEBREW_NO_ENV_HINTS"] = "1"
             if let env = environment {
                 currentEnv.merge(env) { (_, new) in new }
             }
@@ -88,6 +97,7 @@ public struct ProcessRunner {
                 currentEnv["PATH"] = additionalPath
             }
             process.environment = currentEnv
+            process.standardInput = FileHandle.nullDevice
             
             let outputPipe = Pipe()
             let errorPipe = Pipe()
@@ -114,6 +124,12 @@ public struct ProcessRunner {
                     continuation.finish()
                 } else {
                     continuation.finish(throwing: NSError(domain: "ProcessRunner", code: Int(p.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "Process exited with code \(p.terminationStatus)"]))
+                }
+            }
+            
+            continuation.onTermination = { @Sendable _ in
+                if process.isRunning {
+                    process.terminate()
                 }
             }
             
