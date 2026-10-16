@@ -2,11 +2,15 @@ import Foundation
 import SwiftUI
 import Combine
 import WidgetKit
+import AppKit
 
 enum PackageFilterType: String, CaseIterable, Identifiable {
     case all = "All"
-    case casks = "GUI Casks"
+    case casks = "Casks"
     case formulae = "Formulae"
+    case standalone = "Apps"
+    case localBin = "Binaries"
+    case outdated = "Outdated"
     
     var id: String { rawValue }
 }
@@ -22,42 +26,60 @@ enum PackageSortType: String, CaseIterable, Identifiable {
 final class PackagesViewModel: ObservableObject {
     @Published var formulae: [PackageDisplayItem] = []
     @Published var casks: [PackageDisplayItem] = []
+    @Published var standaloneApps: [PackageDisplayItem] = []
+    @Published var localBinaries: [PackageDisplayItem] = []
+    
     @Published var isLoading: Bool = false
     @Published var isUpdating: Bool = false
     @Published var outputLog: String = ""
     @Published var showLog: Bool = false
     @Published var showingImport: Bool = false
     @Published var backupData: BackupData?
+    
+    // Uninstall modal state
     @Published var itemToUninstall: PackageDisplayItem? = nil
     @Published var showingUninstallConfirm: Bool = false
+    @Published var zapCaskPreferences: Bool = false
     
     // Filtering & Sorting
     @Published var searchText: String = ""
     @Published var selectedFilter: PackageFilterType = .all
     @Published var selectedSort: PackageSortType = .name
     
-    var filteredCasks: [PackageDisplayItem] {
-        guard selectedFilter == .all || selectedFilter == .casks else { return [] }
-        var list = casks
-        if !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
-            let query = searchText.lowercased()
-            list = list.filter { $0.name.lowercased().contains(query) || $0.description.lowercased().contains(query) || $0.id.lowercased().contains(query) }
-        }
-        switch selectedSort {
-        case .name:
-            return list.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        case .size:
-            return list.sorted { $0.rawBytes > $1.rawBytes }
-        }
+    var totalOutdatedCount: Int {
+        formulae.filter { $0.hasUpdate }.count + casks.filter { $0.hasUpdate }.count
     }
     
-    var filteredFormulae: [PackageDisplayItem] {
-        guard selectedFilter == .all || selectedFilter == .formulae else { return [] }
-        var list = formulae
-        if !searchText.trimmingCharacters(in: .whitespaces).isEmpty {
-            let query = searchText.lowercased()
-            list = list.filter { $0.name.lowercased().contains(query) || $0.description.lowercased().contains(query) || $0.id.lowercased().contains(query) }
+    var allItems: [PackageDisplayItem] {
+        formulae + casks + standaloneApps + localBinaries
+    }
+    
+    var displayedItems: [PackageDisplayItem] {
+        var list: [PackageDisplayItem]
+        switch selectedFilter {
+        case .all:
+            list = allItems
+        case .casks:
+            list = casks
+        case .formulae:
+            list = formulae
+        case .standalone:
+            list = standaloneApps
+        case .localBin:
+            list = localBinaries
+        case .outdated:
+            list = allItems.filter { $0.hasUpdate }
         }
+        
+        let query = searchText.trimmingCharacters(in: .whitespaces).lowercased()
+        if !query.isEmpty {
+            list = list.filter {
+                $0.name.lowercased().contains(query) ||
+                $0.description.lowercased().contains(query) ||
+                $0.id.lowercased().contains(query)
+            }
+        }
+        
         switch selectedSort {
         case .name:
             return list.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -69,69 +91,126 @@ final class PackagesViewModel: ObservableObject {
     func fetchPackages() async {
         self.isLoading = true
         do {
-            let result = try await BrewQueue.shared.execute(arguments: ["info", "--json=v2", "--installed"])
-            guard result.exitCode == 0, let data = result.output.data(using: .utf8) else {
-                throw NSError(domain: "BrewQueue", code: result.exitCode, userInfo: [NSLocalizedDescriptionKey: result.error.isEmpty ? "Failed to query Homebrew packages." : result.error])
+            async let infoResult = BrewQueue.shared.execute(arguments: ["info", "--json=v2", "--installed"])
+            async let outdatedResult = BrewQueue.shared.execute(arguments: ["outdated", "--json=v2", "--greedy"])
+            
+            let (infoRes, outdatedRes) = try await (infoResult, outdatedResult)
+            
+            guard infoRes.exitCode == 0, let infoData = infoRes.output.data(using: .utf8) else {
+                throw NSError(domain: "BrewQueue", code: infoRes.exitCode, userInfo: [NSLocalizedDescriptionKey: infoRes.error.isEmpty ? "Failed to query Homebrew packages." : infoRes.error])
             }
             
-            // Heavy parsing and disk measurement on background thread
-            let (formulaItems, caskItems, widgetData) = try await Task.detached(priority: .userInitiated) {
-                let response = try JSONDecoder().decode(BrewInfoResponse.self, from: data)
+            let outdatedMap = await Task.detached { () -> (formulae: [String: String], casks: [String: String]) in
+                guard let outData = outdatedRes.output.data(using: .utf8),
+                      let decoded = try? JSONDecoder().decode(BrewOutdatedResponse.self, from: outData) else {
+                    return ([:], [:])
+                }
+                var fMap = [String: String]()
+                for f in decoded.formulae { fMap[f.name] = f.current_version }
+                var cMap = [String: String]()
+                for c in decoded.casks { cMap[c.name] = c.current_version }
+                return (fMap, cMap)
+            }.value
+            
+            let (formulaItems, caskItems, standaloneItems, localItems, widgetData) = try await Task.detached(priority: .userInitiated) {
+                let response = try JSONDecoder().decode(BrewInfoResponse.self, from: infoData)
                 let graph = DependencyGraph(response: response)
+                let scanner = LocalSystemScanner()
                 
-                // Formulae leaves (installed on request)
+                // 1. Formulae Leaves
                 var fItems = [PackageDisplayItem]()
                 let leaves = response.formulae.filter { pkg in
                     pkg.installed.contains(where: { $0.installed_on_request == true })
                 }
-                
                 for pkg in leaves {
                     var visited = Set<String>()
                     let totalBytes = graph.sizeOf(package: pkg.name, visited: &visited)
+                    let newVersion = outdatedMap.formulae[pkg.name]
                     fItems.append(PackageDisplayItem(
                         id: pkg.name,
                         name: pkg.name,
-                        description: pkg.desc ?? "No description",
+                        description: pkg.desc ?? "Formula",
                         sizeString: graph.formattedSize(bytes: totalBytes),
                         rawBytes: totalBytes,
-                        isCask: false
+                        kind: .formula,
+                        outdatedVersion: newVersion
                     ))
                 }
                 
-                // Casks
+                // 2. Casks
                 var cItems = [PackageDisplayItem]()
                 let installedCasks = response.casks.filter { $0.installed != nil }
                 for cask in installedCasks {
                     let totalBytes = graph.sizeOf(cask: cask)
+                    let newVersion = outdatedMap.casks[cask.token]
                     cItems.append(PackageDisplayItem(
                         id: cask.token,
                         name: cask.displayName,
                         description: cask.desc ?? cask.token,
                         sizeString: graph.formattedSize(bytes: totalBytes),
                         rawBytes: totalBytes,
-                        isCask: true
+                        kind: .cask,
+                        outdatedVersion: newVersion
                     ))
                 }
                 
-                // True aggregate physical size without duplicate counting
-                let totalAllBytes = graph.totalPhysicalBytes(
+                // 3. Standalone GUI Emulators (outside Homebrew)
+                let managedTokens = Set(installedCasks.map { $0.token })
+                let managedNames = Set(installedCasks.map { $0.displayName })
+                let rawStandalone = scanner.scanStandaloneEmulators(managedCaskTokens: managedTokens, managedCaskNames: managedNames)
+                var sItems = [PackageDisplayItem]()
+                for app in rawStandalone {
+                    sItems.append(PackageDisplayItem(
+                        id: app.bundlePath,
+                        name: app.name,
+                        description: app.isSystemProtected ? "macOS Built-in Terminal" : "Standalone GUI App",
+                        sizeString: graph.formattedSize(bytes: app.sizeBytes),
+                        rawBytes: app.sizeBytes,
+                        kind: .standaloneApp,
+                        isSystemProtected: app.isSystemProtected,
+                        filePath: app.bundlePath
+                    ))
+                }
+                
+                // 4. Local Binaries (~/.local/bin)
+                let rawLocalBinaries = scanner.scanLocalBinaries()
+                var lItems = [PackageDisplayItem]()
+                for bin in rawLocalBinaries {
+                    let desc = bin.targetPath != nil ? "Symlink -> \(bin.targetPath!)" : "Local executable"
+                    lItems.append(PackageDisplayItem(
+                        id: bin.path,
+                        name: bin.name,
+                        description: desc,
+                        sizeString: graph.formattedSize(bytes: bin.sizeBytes),
+                        rawBytes: bin.sizeBytes,
+                        kind: .localBinary,
+                        filePath: bin.path
+                    ))
+                }
+                
+                // Total physical disk computation
+                var totalBytes = graph.totalPhysicalBytes(
                     leaves: leaves.map { $0.name },
                     casks: installedCasks
                 )
+                for app in rawStandalone { totalBytes += Int64(app.sizeBytes) }
+                for bin in rawLocalBinaries { totalBytes += Int64(bin.sizeBytes) }
                 
                 let wData = WidgetData(
-                    appsCount: cItems.count,
-                    packagesCount: fItems.count,
-                    totalBytes: totalAllBytes,
-                    formattedDiskSpace: graph.formattedSize(bytes: Int(totalAllBytes)),
+                    appsCount: cItems.count + sItems.count,
+                    packagesCount: fItems.count + lItems.count,
+                    totalBytes: totalBytes,
+                    formattedDiskSpace: graph.formattedSize(bytes: Int(totalBytes)),
                     lastUpdated: Date()
                 )
                 
-                return (fItems, cItems, wData)
+                return (fItems, cItems, sItems, lItems, wData)
             }.value
             
             self.formulae = formulaItems
             self.casks = caskItems
+            self.standaloneApps = standaloneItems
+            self.localBinaries = localItems
             widgetData.save()
             WidgetCenter.shared.reloadAllTimelines()
         } catch {
@@ -140,6 +219,30 @@ final class PackagesViewModel: ObservableObject {
         }
         self.isLoading = false
         self.isUpdating = false
+    }
+    
+    func upgradeItem(item: PackageDisplayItem) {
+        self.isUpdating = true
+        self.showLog = true
+        self.outputLog = "Upgrading \(item.name)...\n"
+        Task {
+            do {
+                var args = ["upgrade"]
+                if item.isCask {
+                    args.append("--cask")
+                }
+                args.append(item.id)
+                let stream = await BrewQueue.shared.stream(arguments: args)
+                for try await line in stream {
+                    self.outputLog += line
+                }
+                self.outputLog += "\nUpgrade of \(item.name) completed.\n"
+                await fetchPackages()
+            } catch {
+                self.outputLog += "\nError: \(error.localizedDescription)\n"
+            }
+            self.isUpdating = false
+        }
     }
     
     func updatePackages() {
@@ -166,28 +269,43 @@ final class PackagesViewModel: ObservableObject {
         }
     }
     
-    func uninstall(item: PackageDisplayItem) {
+    func uninstall(item: PackageDisplayItem, zap: Bool = false) {
         self.isUpdating = true
         self.showLog = true
-        self.outputLog = "Uninstalling \(item.name) (\(item.id))...\n"
+        self.outputLog = "Uninstalling \(item.name)...\n"
         Task {
             do {
-                var args = ["uninstall"]
-                if item.isCask {
-                    args.append("--cask")
-                }
-                args.append(item.id)
-                
-                let stream = await BrewQueue.shared.stream(arguments: args)
-                for try await line in stream {
-                    self.outputLog += line
-                }
-                
-                if !item.isCask {
+                switch item.kind {
+                case .cask:
+                    var args = ["uninstall", "--cask"]
+                    if zap { args.append("--zap") }
+                    args.append(item.id)
+                    let stream = await BrewQueue.shared.stream(arguments: args)
+                    for try await line in stream {
+                        self.outputLog += line
+                    }
+                case .formula:
+                    let stream = await BrewQueue.shared.stream(arguments: ["uninstall", item.id])
+                    for try await line in stream {
+                        self.outputLog += line
+                    }
                     self.outputLog += "\nCleaning up orphaned dependencies (brew autoremove)...\n"
                     let streamAutoremove = await BrewQueue.shared.stream(arguments: ["autoremove"])
                     for try await line in streamAutoremove {
                         self.outputLog += line
+                    }
+                case .standaloneApp:
+                    if let path = item.filePath {
+                        let url = URL(fileURLWithPath: path)
+                        self.outputLog += "Moving \(path) to Trash...\n"
+                        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                        self.outputLog += "Moved to Trash successfully.\n"
+                    }
+                case .localBinary:
+                    if let path = item.filePath {
+                        self.outputLog += "Deleting \(path)...\n"
+                        try FileManager.default.removeItem(atPath: path)
+                        self.outputLog += "Deleted successfully.\n"
                     }
                 }
                 
@@ -229,16 +347,24 @@ final class PackagesViewModel: ObservableObject {
         }
     }
     
-    func exportConfig() {
+    func exportConfig(asBrewfile: Bool = false) {
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "TerminalManager_Backup.json"
+        if asBrewfile {
+            panel.nameFieldStringValue = "Brewfile"
+        } else {
+            panel.allowedContentTypes = [.json]
+            panel.nameFieldStringValue = "TerminalManager_Backup.json"
+        }
         
         if panel.runModal() == .OK, let url = panel.url {
             let formulaNames = self.formulae.map { $0.id }
             let caskTokens = self.casks.map { $0.id }
             do {
-                try BackupManager.export(formulae: formulaNames, casks: caskTokens, to: url)
+                if asBrewfile {
+                    try BackupManager.exportBrewfile(formulae: formulaNames, casks: caskTokens, to: url)
+                } else {
+                    try BackupManager.export(formulae: formulaNames, casks: caskTokens, to: url)
+                }
             } catch {
                 self.outputLog = "Export error: \(error.localizedDescription)"
                 self.showLog = true
@@ -269,29 +395,34 @@ struct PackagesView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header Bar
+            // Top Bar
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Terminal Manager")
                         .font(.headline)
-                    Text("\(viewModel.casks.count) GUI Casks · \(viewModel.formulae.count) Formulae Leaves")
+                    Text("\(viewModel.casks.count) Casks · \(viewModel.formulae.count) Formulae · \(viewModel.standaloneApps.count) Apps · \(viewModel.localBinaries.count) Binaries")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 
                 Spacer()
                 
-                Button {
-                    viewModel.importConfig()
+                Menu {
+                    Button("Export JSON Backup...") {
+                        viewModel.exportConfig(asBrewfile: false)
+                    }
+                    Button("Export Brewfile...") {
+                        viewModel.exportConfig(asBrewfile: true)
+                    }
                 } label: {
-                    Label("Import", systemImage: "square.and.arrow.down")
+                    Label("Export", systemImage: "square.and.arrow.up")
                 }
                 .disabled(viewModel.isUpdating)
                 
                 Button {
-                    viewModel.exportConfig()
+                    viewModel.importConfig()
                 } label: {
-                    Label("Export", systemImage: "square.and.arrow.up")
+                    Label("Import", systemImage: "square.and.arrow.down")
                 }
                 .disabled(viewModel.isUpdating)
                 
@@ -312,7 +443,7 @@ struct PackagesView: View {
                 HStack {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    TextField("Search packages or apps...", text: $viewModel.searchText)
+                    TextField("Search packages, casks or binaries...", text: $viewModel.searchText)
                         .textFieldStyle(.plain)
                     if !viewModel.searchText.isEmpty {
                         Button {
@@ -331,18 +462,22 @@ struct PackagesView: View {
                 
                 Picker("", selection: $viewModel.selectedFilter) {
                     ForEach(PackageFilterType.allCases) { filter in
-                        Text(filter.rawValue).tag(filter)
+                        if filter == .outdated {
+                            Text("Outdated (\(viewModel.totalOutdatedCount))").tag(filter)
+                        } else {
+                            Text(filter.rawValue).tag(filter)
+                        }
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 220)
+                .frame(width: 380)
                 
                 Picker("Sort", selection: $viewModel.selectedSort) {
                     ForEach(PackageSortType.allCases) { sort in
                         Text(sort.rawValue).tag(sort)
                     }
                 }
-                .frame(width: 130)
+                .frame(width: 120)
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
@@ -350,7 +485,7 @@ struct PackagesView: View {
             
             Divider()
             
-            // Process Log Console
+            // Live Output Console
             if viewModel.showLog {
                 VStack(spacing: 4) {
                     HStack {
@@ -386,37 +521,25 @@ struct PackagesView: View {
                 Divider()
             }
             
-            // Main Package List
+            // Package List
             if viewModel.isLoading {
                 Spacer()
-                ProgressView("Auditing packages and disk sizes...")
+                ProgressView("Auditing system packages and emulators...")
                 Spacer()
-            } else if viewModel.filteredCasks.isEmpty && viewModel.filteredFormulae.isEmpty {
+            } else if viewModel.displayedItems.isEmpty {
                 Spacer()
                 VStack(spacing: 6) {
                     Image(systemName: "archivebox")
                         .font(.largeTitle)
                         .foregroundColor(.secondary)
-                    Text("No packages match your criteria.")
+                    Text("No items found.")
                         .foregroundColor(.secondary)
                 }
                 Spacer()
             } else {
                 List {
-                    if !viewModel.filteredCasks.isEmpty {
-                        Section("GUI Terminal Apps & Casks (\(viewModel.filteredCasks.count))") {
-                            ForEach(viewModel.filteredCasks) { item in
-                                packageRow(item: item)
-                            }
-                        }
-                    }
-                    
-                    if !viewModel.filteredFormulae.isEmpty {
-                        Section("CLI Packages & Dependencies (\(viewModel.filteredFormulae.count))") {
-                            ForEach(viewModel.filteredFormulae) { item in
-                                packageRow(item: item)
-                            }
-                        }
+                    ForEach(viewModel.displayedItems) { item in
+                        packageRow(item: item)
                     }
                 }
             }
@@ -440,16 +563,27 @@ struct PackagesView: View {
         .alert("Uninstall \(viewModel.itemToUninstall?.name ?? "")?", isPresented: $viewModel.showingUninstallConfirm) {
             Button("Cancel", role: .cancel) {
                 viewModel.itemToUninstall = nil
+                viewModel.zapCaskPreferences = false
             }
             Button("Uninstall", role: .destructive) {
                 if let item = viewModel.itemToUninstall {
-                    viewModel.uninstall(item: item)
+                    let zap = viewModel.zapCaskPreferences
+                    viewModel.uninstall(item: item, zap: zap)
                     viewModel.itemToUninstall = nil
+                    viewModel.zapCaskPreferences = false
                 }
             }
         } message: {
             if let item = viewModel.itemToUninstall {
-                Text("Are you sure you want to uninstall '\(item.name)'? This will free approximately \(item.sizeString) of disk space.")
+                if item.isCask {
+                    Text("Are you sure you want to uninstall '\(item.name)'? This will free approximately \(item.sizeString) of disk space.")
+                } else if item.isStandaloneApp {
+                    Text("Are you sure you want to move '\(item.name)' to Trash? This will free approximately \(item.sizeString).")
+                } else if item.isLocalBinary {
+                    Text("Are you sure you want to delete binary '\(item.name)' from ~/.local/bin?")
+                } else {
+                    Text("Are you sure you want to uninstall '\(item.name)'? Unused dependencies will also be removed.")
+                }
             }
         }
     }
@@ -457,14 +591,50 @@ struct PackagesView: View {
     @ViewBuilder
     private func packageRow(item: PackageDisplayItem) -> some View {
         HStack {
-            Image(systemName: item.isCask ? "macwindow" : "terminal")
-                .foregroundColor(.accentColor)
+            Image(systemName: iconName(for: item.kind))
+                .foregroundColor(iconColor(for: item.kind))
                 .frame(width: 20)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.name)
-                    .font(.subheadline)
-                    .bold()
+                HStack(spacing: 6) {
+                    Text(item.name)
+                        .font(.subheadline)
+                        .bold()
+                    
+                    if let newVersion = item.outdatedVersion {
+                        Text("Update: \(newVersion)")
+                            .font(.caption2)
+                            .bold()
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.orange.opacity(0.15)))
+                    }
+                    
+                    if item.isSystemProtected {
+                        Text("System")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                    } else if item.isStandaloneApp {
+                        Text("Standalone")
+                            .font(.caption2)
+                            .foregroundColor(.purple)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.purple.opacity(0.15)))
+                    } else if item.isLocalBinary {
+                        Text("~/.local/bin")
+                            .font(.caption2)
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.blue.opacity(0.15)))
+                    }
+                }
+                
                 Text(item.description)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -476,19 +646,53 @@ struct PackagesView: View {
             Text(item.sizeString)
                 .font(.caption.monospacedDigit())
                 .foregroundColor(.secondary)
-                .padding(.trailing, 8)
+                .padding(.trailing, 6)
             
-            Button(role: .destructive) {
-                viewModel.itemToUninstall = item
-                viewModel.showingUninstallConfirm = true
-            } label: {
-                Image(systemName: "trash")
-                    .foregroundColor(.red)
+            if item.hasUpdate {
+                Button("Update") {
+                    viewModel.upgradeItem(item: item)
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(viewModel.isUpdating)
             }
-            .buttonStyle(.plain)
-            .help("Uninstall \(item.name)")
-            .disabled(viewModel.isUpdating)
+            
+            if !item.isSystemProtected {
+                Button(role: .destructive) {
+                    viewModel.itemToUninstall = item
+                    viewModel.showingUninstallConfirm = true
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red)
+                }
+                .buttonStyle(.plain)
+                .help("Uninstall \(item.name)")
+                .disabled(viewModel.isUpdating)
+            } else {
+                Image(systemName: "lock.fill")
+                    .foregroundColor(.secondary)
+                    .help("Protected by macOS system")
+            }
         }
         .padding(.vertical, 3)
+    }
+    
+    private func iconName(for kind: PackageKind) -> String {
+        switch kind {
+        case .cask: return "macwindow"
+        case .formula: return "terminal"
+        case .standaloneApp: return "app.dashed"
+        case .localBinary: return "chevron.left.forwardslash.chevron.right"
+        }
+    }
+    
+    private func iconColor(for kind: PackageKind) -> Color {
+        switch kind {
+        case .cask: return .accentColor
+        case .formula: return .green
+        case .standaloneApp: return .purple
+        case .localBinary: return .blue
+        }
     }
 }

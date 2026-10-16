@@ -58,7 +58,7 @@ final class TerminalManagerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(total, 0)
     }
     
-    func testBackupManagerRoundTrip() throws {
+    func testBackupManagerJSONRoundTrip() throws {
         let tempDir = FileManager.default.temporaryDirectory
         let fileURL = tempDir.appendingPathComponent("test_backup_\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: fileURL) }
@@ -72,5 +72,36 @@ final class TerminalManagerTests: XCTestCase {
         let loaded = try BackupManager.load(from: fileURL)
         XCTAssertEqual(loaded.formulae, formulae)
         XCTAssertEqual(loaded.casks, casks)
+    }
+    
+    func testBackupManagerBrewfileExport() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileURL = tempDir.appendingPathComponent("Brewfile_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        
+        let formulae = ["curl", "git"]
+        let casks = ["iterm2"]
+        
+        try BackupManager.exportBrewfile(formulae: formulae, casks: casks, to: fileURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        
+        let content = try String(contentsOf: fileURL, encoding: .utf8)
+        XCTAssertTrue(content.contains("cask \"iterm2\""))
+        XCTAssertTrue(content.contains("brew \"curl\""))
+        XCTAssertTrue(content.contains("brew \"git\""))
+    }
+    
+    func testLocalSystemScanner() {
+        let scanner = LocalSystemScanner()
+        let binaries = scanner.scanLocalBinaries()
+        // Must return an array without throwing
+        XCTAssertGreaterThanOrEqual(binaries.count, 0)
+        
+        let emulators = scanner.scanStandaloneEmulators(managedCaskTokens: ["iterm2"], managedCaskNames: ["iTerm"])
+        XCTAssertGreaterThanOrEqual(emulators.count, 0)
+        // If Terminal.app was found, verify it's marked as system protected
+        if let terminalApp = emulators.first(where: { $0.name == "Terminal" }) {
+            XCTAssertTrue(terminalApp.isSystemProtected)
+        }
     }
 }
