@@ -8,6 +8,7 @@ enum PackageFilterType: String, CaseIterable, Identifiable {
     case all = "All"
     case casks = "Casks"
     case formulae = "Formulae"
+    case nodeNpm = "Node/NPM"
     case standalone = "Apps"
     case localBin = "Binaries"
     case outdated = "Outdated"
@@ -26,6 +27,7 @@ enum PackageSortType: String, CaseIterable, Identifiable {
 final class PackagesViewModel: ObservableObject {
     @Published var formulae: [PackageDisplayItem] = []
     @Published var casks: [PackageDisplayItem] = []
+    @Published var nodeAndNpmItems: [PackageDisplayItem] = []
     @Published var standaloneApps: [PackageDisplayItem] = []
     @Published var localBinaries: [PackageDisplayItem] = []
     
@@ -51,7 +53,7 @@ final class PackagesViewModel: ObservableObject {
     }
     
     var allItems: [PackageDisplayItem] {
-        formulae + casks + standaloneApps + localBinaries
+        formulae + casks + nodeAndNpmItems + standaloneApps + localBinaries
     }
     
     var displayedItems: [PackageDisplayItem] {
@@ -63,6 +65,8 @@ final class PackagesViewModel: ObservableObject {
             list = casks
         case .formulae:
             list = formulae
+        case .nodeNpm:
+            list = nodeAndNpmItems
         case .standalone:
             list = standaloneApps
         case .localBin:
@@ -76,7 +80,8 @@ final class PackagesViewModel: ObservableObject {
             list = list.filter {
                 $0.name.lowercased().contains(query) ||
                 $0.description.lowercased().contains(query) ||
-                $0.id.lowercased().contains(query)
+                $0.id.lowercased().contains(query) ||
+                ($0.badgeText?.lowercased().contains(query) ?? false)
             }
         }
         
@@ -112,7 +117,7 @@ final class PackagesViewModel: ObservableObject {
                 return (fMap, cMap)
             }.value
             
-            let (formulaItems, caskItems, standaloneItems, localItems, widgetData) = try await Task.detached(priority: .userInitiated) {
+            let (formulaItems, caskItems, nodeNpmItems, standaloneItems, localItems, widgetData) = try await Task.detached(priority: .userInitiated) {
                 let response = try JSONDecoder().decode(BrewInfoResponse.self, from: infoData)
                 let graph = DependencyGraph(response: response)
                 let scanner = LocalSystemScanner()
@@ -154,7 +159,39 @@ final class PackagesViewModel: ObservableObject {
                     ))
                 }
                 
-                // 3. Standalone GUI Emulators (outside Homebrew)
+                // 3. NVM Node.js Versions & Global NPM Packages
+                let (rawNvmNodes, rawNpmGlobals) = scanner.scanNvmAndNpm()
+                var nItems = [PackageDisplayItem]()
+                for node in rawNvmNodes {
+                    let desc = node.isDefault
+                        ? "Default NVM Node.js runtime (includes npm & corepack)"
+                        : "NVM Node.js runtime (includes npm & corepack)"
+                    nItems.append(PackageDisplayItem(
+                        id: node.path,
+                        name: "Node.js \(node.version)",
+                        description: desc,
+                        sizeString: graph.formattedSize(bytes: node.sizeBytes),
+                        rawBytes: node.sizeBytes,
+                        kind: .nvmNode,
+                        filePath: node.path,
+                        badgeText: node.isDefault ? "NVM Default" : "NVM Runtime"
+                    ))
+                }
+                for npmPkg in rawNpmGlobals {
+                    nItems.append(PackageDisplayItem(
+                        id: npmPkg.path,
+                        name: npmPkg.name,
+                        description: npmPkg.description,
+                        sizeString: graph.formattedSize(bytes: npmPkg.sizeBytes),
+                        rawBytes: npmPkg.sizeBytes,
+                        kind: .npmGlobal,
+                        filePath: npmPkg.path,
+                        badgeText: npmPkg.nodeLabel,
+                        npmBinaryPath: npmPkg.npmBinaryPath
+                    ))
+                }
+                
+                // 4. Standalone GUI Emulators (outside Homebrew)
                 let managedTokens = Set(installedCasks.map { $0.token })
                 let managedNames = Set(installedCasks.map { $0.displayName })
                 let rawStandalone = scanner.scanStandaloneEmulators(managedCaskTokens: managedTokens, managedCaskNames: managedNames)
@@ -172,7 +209,7 @@ final class PackagesViewModel: ObservableObject {
                     ))
                 }
                 
-                // 4. Local Binaries (~/.local/bin)
+                // 5. Local Binaries (~/.local/bin)
                 let rawLocalBinaries = scanner.scanLocalBinaries()
                 var lItems = [PackageDisplayItem]()
                 for bin in rawLocalBinaries {
@@ -188,27 +225,30 @@ final class PackagesViewModel: ObservableObject {
                     ))
                 }
                 
-                // Total physical disk computation
+                // Total physical disk computation (avoiding double counting npm globals inside NVM nodes)
                 var totalBytes = graph.totalPhysicalBytes(
                     leaves: leaves.map { $0.name },
                     casks: installedCasks
                 )
+                for node in rawNvmNodes { totalBytes += Int64(node.sizeBytes) }
+                for npmPkg in rawNpmGlobals where !npmPkg.isInsideNvm { totalBytes += Int64(npmPkg.sizeBytes) }
                 for app in rawStandalone { totalBytes += Int64(app.sizeBytes) }
                 for bin in rawLocalBinaries { totalBytes += Int64(bin.sizeBytes) }
                 
                 let wData = WidgetData(
                     appsCount: cItems.count + sItems.count,
-                    packagesCount: fItems.count + lItems.count,
+                    packagesCount: fItems.count + lItems.count + nItems.count,
                     totalBytes: totalBytes,
                     formattedDiskSpace: graph.formattedSize(bytes: Int(totalBytes)),
                     lastUpdated: Date()
                 )
                 
-                return (fItems, cItems, sItems, lItems, wData)
+                return (fItems, cItems, nItems, sItems, lItems, wData)
             }.value
             
             self.formulae = formulaItems
             self.casks = caskItems
+            self.nodeAndNpmItems = nodeNpmItems
             self.standaloneApps = standaloneItems
             self.localBinaries = localItems
             widgetData.save()
@@ -293,6 +333,30 @@ final class PackagesViewModel: ObservableObject {
                     let streamAutoremove = await BrewQueue.shared.stream(arguments: ["autoremove"])
                     for try await line in streamAutoremove {
                         self.outputLog += line
+                    }
+                case .nvmNode:
+                    if let path = item.filePath {
+                        self.outputLog += "Removing NVM Node runtime at \(path)...\n"
+                        try FileManager.default.removeItem(atPath: path)
+                        self.outputLog += "Removed \(item.name) successfully.\n"
+                    }
+                case .npmGlobal:
+                    if let npmBin = item.npmBinaryPath, FileManager.default.fileExists(atPath: npmBin) {
+                        let nodeBinDir = URL(fileURLWithPath: npmBin).deletingLastPathComponent().path
+                        let existingPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
+                        let customEnv = ["PATH": "\(nodeBinDir):\(existingPath)"]
+                        self.outputLog += "Running \(npmBin) uninstall -g \(item.name)...\n"
+                        let stream = ProcessRunner().streamProcess(
+                            executableURL: URL(fileURLWithPath: npmBin),
+                            arguments: ["uninstall", "-g", item.name],
+                            environment: customEnv
+                        )
+                        for try await line in stream {
+                            self.outputLog += line
+                        }
+                    } else if let path = item.filePath {
+                        self.outputLog += "Removing global npm package directory at \(path)...\n"
+                        try FileManager.default.removeItem(atPath: path)
                     }
                 case .standaloneApp:
                     if let path = item.filePath {
@@ -400,7 +464,7 @@ struct PackagesView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Terminal Manager")
                         .font(.headline)
-                    Text("\(viewModel.casks.count) Casks · \(viewModel.formulae.count) Formulae · \(viewModel.standaloneApps.count) Apps · \(viewModel.localBinaries.count) Binaries")
+                    Text("\(viewModel.casks.count) Casks · \(viewModel.formulae.count) Formulae · \(viewModel.nodeAndNpmItems.count) Node/NPM · \(viewModel.standaloneApps.count) Apps · \(viewModel.localBinaries.count) Binaries")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -443,7 +507,7 @@ struct PackagesView: View {
                 HStack {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    TextField("Search packages, casks or binaries...", text: $viewModel.searchText)
+                    TextField("Search packages, Node/NPM, casks or binaries...", text: $viewModel.searchText)
                         .textFieldStyle(.plain)
                     if !viewModel.searchText.isEmpty {
                         Button {
@@ -470,7 +534,7 @@ struct PackagesView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 380)
+                .frame(width: 440)
                 
                 Picker("Sort", selection: $viewModel.selectedSort) {
                     ForEach(PackageSortType.allCases) { sort in
@@ -524,7 +588,7 @@ struct PackagesView: View {
             // Package List
             if viewModel.isLoading {
                 Spacer()
-                ProgressView("Auditing system packages and emulators...")
+                ProgressView("Auditing system packages, NVM/NPM, and emulators...")
                 Spacer()
             } else if viewModel.displayedItems.isEmpty {
                 Spacer()
@@ -577,6 +641,10 @@ struct PackagesView: View {
             if let item = viewModel.itemToUninstall {
                 if item.isCask {
                     Text("Are you sure you want to uninstall '\(item.name)'? This will free approximately \(item.sizeString) of disk space.")
+                } else if item.isNvmNode {
+                    Text("Are you sure you want to remove NVM Node runtime '\(item.name)' and all global npm packages installed under it (\(item.sizeString))?")
+                } else if item.isNpmGlobal {
+                    Text("Are you sure you want to uninstall global npm package '\(item.name)' (\(item.badgeText ?? "npm"))?")
                 } else if item.isStandaloneApp {
                     Text("Are you sure you want to move '\(item.name)' to Trash? This will free approximately \(item.sizeString).")
                 } else if item.isLocalBinary {
@@ -609,6 +677,15 @@ struct PackagesView: View {
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
                             .background(Capsule().fill(Color.orange.opacity(0.15)))
+                    }
+                    
+                    if let badge = item.badgeText {
+                        Text(badge)
+                            .font(.caption2)
+                            .foregroundColor(item.isNvmNode ? .teal : .pink)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill((item.isNvmNode ? Color.teal : Color.pink).opacity(0.15)))
                     }
                     
                     if item.isSystemProtected {
@@ -682,6 +759,8 @@ struct PackagesView: View {
         switch kind {
         case .cask: return "macwindow"
         case .formula: return "terminal"
+        case .nvmNode: return "shippingbox.fill"
+        case .npmGlobal: return "cube.box.fill"
         case .standaloneApp: return "app.dashed"
         case .localBinary: return "chevron.left.forwardslash.chevron.right"
         }
@@ -691,6 +770,8 @@ struct PackagesView: View {
         switch kind {
         case .cask: return .accentColor
         case .formula: return .green
+        case .nvmNode: return .teal
+        case .npmGlobal: return .pink
         case .standaloneApp: return .purple
         case .localBinary: return .blue
         }

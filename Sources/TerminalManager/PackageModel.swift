@@ -101,6 +101,8 @@ public enum PackageKind: String, Sendable {
     case cask
     case standaloneApp
     case localBinary
+    case nvmNode
+    case npmGlobal
 }
 
 public struct PackageDisplayItem: Identifiable, Sendable {
@@ -113,10 +115,14 @@ public struct PackageDisplayItem: Identifiable, Sendable {
     public let outdatedVersion: String?
     public let isSystemProtected: Bool
     public let filePath: String?
+    public let badgeText: String?
+    public let npmBinaryPath: String?
     
     public var isCask: Bool { kind == .cask }
     public var isStandaloneApp: Bool { kind == .standaloneApp }
     public var isLocalBinary: Bool { kind == .localBinary }
+    public var isNvmNode: Bool { kind == .nvmNode }
+    public var isNpmGlobal: Bool { kind == .npmGlobal }
     public var hasUpdate: Bool { outdatedVersion != nil }
     
     public init(
@@ -128,7 +134,9 @@ public struct PackageDisplayItem: Identifiable, Sendable {
         kind: PackageKind = .formula,
         outdatedVersion: String? = nil,
         isSystemProtected: Bool = false,
-        filePath: String? = nil
+        filePath: String? = nil,
+        badgeText: String? = nil,
+        npmBinaryPath: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -139,6 +147,8 @@ public struct PackageDisplayItem: Identifiable, Sendable {
         self.outdatedVersion = outdatedVersion
         self.isSystemProtected = isSystemProtected
         self.filePath = filePath
+        self.badgeText = badgeText
+        self.npmBinaryPath = npmBinaryPath
     }
     
     public init(id: String, name: String, description: String, sizeString: String, rawBytes: Int = 0, isCask: Bool) {

@@ -103,5 +103,9 @@ final class TerminalManagerTests: XCTestCase {
         if let terminalApp = emulators.first(where: { $0.name == "Terminal" }) {
             XCTAssertTrue(terminalApp.isSystemProtected)
         }
+        
+        let (nvmNodes, npmGlobals) = scanner.scanNvmAndNpm()
+        XCTAssertGreaterThanOrEqual(nvmNodes.count, 0)
+        XCTAssertGreaterThanOrEqual(npmGlobals.count, 0)
     }
 }

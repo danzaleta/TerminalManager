@@ -17,6 +17,32 @@ public struct LocalBinaryItem: Identifiable, Sendable {
     public let sizeBytes: Int
 }
 
+public struct NvmNodeItem: Identifiable, Sendable {
+    public var id: String { path }
+    public let version: String
+    public let path: String
+    public let isDefault: Bool
+    public let sizeBytes: Int
+}
+
+public struct NpmGlobalPackageItem: Identifiable, Sendable {
+    public var id: String { path }
+    public let name: String
+    public let version: String
+    public let description: String
+    public let path: String
+    public let nodeLabel: String
+    public let npmBinaryPath: String
+    public let sizeBytes: Int
+    public let isInsideNvm: Bool
+}
+
+private struct NpmPackageJSON: Decodable {
+    let name: String?
+    let version: String?
+    let description: String?
+}
+
 public struct LocalSystemScanner: Sendable {
     public init() {}
     
@@ -120,6 +146,157 @@ public struct LocalSystemScanner: Sendable {
         }
         
         return items.sorted { $0.name < $1.name }
+    }
+    
+    /// Scans ~/.nvm/versions/node for installed Node.js runtimes and global npm packages across NVM and Homebrew.
+    public func scanNvmAndNpm() -> (nvmNodes: [NvmNodeItem], npmGlobals: [NpmGlobalPackageItem]) {
+        let homeDir = NSHomeDirectory()
+        let nvmDir = ProcessInfo.processInfo.environment["NVM_DIR"] ?? "\(homeDir)/.nvm"
+        let versionsDir = "\(nvmDir)/versions/node"
+        
+        let defaultAliasPath = "\(nvmDir)/alias/default"
+        let rawDefaultAlias = (try? String(contentsOfFile: defaultAliasPath, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        
+        var nvmNodes: [NvmNodeItem] = []
+        var npmGlobals: [NpmGlobalPackageItem] = []
+        
+        // 1. Scan NVM Node versions and their global node_modules
+        if let versionFolders = try? FileManager.default.contentsOfDirectory(atPath: versionsDir) {
+            for folder in versionFolders where folder.hasPrefix("v") {
+                let nodePath = "\(versionsDir)/\(folder)"
+                let isDefault = !rawDefaultAlias.isEmpty && (
+                    folder == rawDefaultAlias ||
+                    folder == "v\(rawDefaultAlias)" ||
+                    folder.hasPrefix("v\(rawDefaultAlias).")
+                )
+                
+                let nodeSize = calculateDirectorySize(atPath: nodePath)
+                nvmNodes.append(NvmNodeItem(
+                    version: folder,
+                    path: nodePath,
+                    isDefault: isDefault,
+                    sizeBytes: nodeSize
+                ))
+                
+                let nodeModulesPath = "\(nodePath)/lib/node_modules"
+                let npmBin = "\(nodePath)/bin/npm"
+                let foundGlobals = scanNodeModulesDirectory(
+                    atPath: nodeModulesPath,
+                    nodeLabel: "NVM \(folder)",
+                    npmBinaryPath: npmBin,
+                    isInsideNvm: true
+                )
+                npmGlobals.append(contentsOf: foundGlobals)
+            }
+        }
+        
+        // 2. Scan Homebrew global node_modules (/opt/homebrew/lib/node_modules or /usr/local/lib/node_modules)
+        let brewPrefix = BrewLocator.brewPrefix
+        let brewNodeModules = "\(brewPrefix)/lib/node_modules"
+        let brewNpmBin = "\(brewPrefix)/bin/npm"
+        if FileManager.default.fileExists(atPath: brewNodeModules) {
+            let brewGlobals = scanNodeModulesDirectory(
+                atPath: brewNodeModules,
+                nodeLabel: "Homebrew Node",
+                npmBinaryPath: brewNpmBin,
+                isInsideNvm: false
+            )
+            npmGlobals.append(contentsOf: brewGlobals)
+        }
+        
+        nvmNodes.sort { $0.version.localizedStandardCompare($1.version) == .orderedDescending }
+        npmGlobals.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        
+        return (nvmNodes, npmGlobals)
+    }
+    
+    private func scanNodeModulesDirectory(
+        atPath nodeModulesPath: String,
+        nodeLabel: String,
+        npmBinaryPath: String,
+        isInsideNvm: Bool
+    ) -> [NpmGlobalPackageItem] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: nodeModulesPath) else {
+            return []
+        }
+        
+        let builtInPackages: Set<String> = ["npm", "corepack"]
+        var results: [NpmGlobalPackageItem] = []
+        
+        for entry in entries where !entry.hasPrefix(".") {
+            if builtInPackages.contains(entry) { continue }
+            
+            let fullEntryPath = "\(nodeModulesPath)/\(entry)"
+            if entry.hasPrefix("@") {
+                // Scoped package directory (e.g. @playwright/cli)
+                guard let scopedEntries = try? FileManager.default.contentsOfDirectory(atPath: fullEntryPath) else { continue }
+                for subEntry in scopedEntries where !subEntry.hasPrefix(".") {
+                    let pkgPath = "\(fullEntryPath)/\(subEntry)"
+                    let pkgName = "\(entry)/\(subEntry)"
+                    if let item = buildNpmPackageItem(
+                        defaultName: pkgName,
+                        pkgPath: pkgPath,
+                        nodeLabel: nodeLabel,
+                        npmBinaryPath: npmBinaryPath,
+                        isInsideNvm: isInsideNvm
+                    ) {
+                        results.append(item)
+                    }
+                }
+            } else {
+                if let item = buildNpmPackageItem(
+                    defaultName: entry,
+                    pkgPath: fullEntryPath,
+                    nodeLabel: nodeLabel,
+                    npmBinaryPath: npmBinaryPath,
+                    isInsideNvm: isInsideNvm
+                ) {
+                    results.append(item)
+                }
+            }
+        }
+        
+        return results
+    }
+    
+    private func buildNpmPackageItem(
+        defaultName: String,
+        pkgPath: String,
+        nodeLabel: String,
+        npmBinaryPath: String,
+        isInsideNvm: Bool
+    ) -> NpmGlobalPackageItem? {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: pkgPath, isDirectory: &isDir), isDir.boolValue else {
+            return nil
+        }
+        
+        let packageJsonPath = "\(pkgPath)/package.json"
+        var name = defaultName
+        var version = ""
+        var desc = "Global npm package"
+        
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: packageJsonPath)),
+           let decoded = try? JSONDecoder().decode(NpmPackageJSON.self, from: data) {
+            if let n = decoded.name, !n.isEmpty { name = n }
+            if let v = decoded.version, !v.isEmpty { version = v }
+            if let d = decoded.description, !d.isEmpty { desc = d }
+        }
+        
+        let size = calculateDirectorySize(atPath: pkgPath)
+        let fullDesc = version.isEmpty ? desc : "v\(version) · \(desc)"
+        
+        return NpmGlobalPackageItem(
+            name: name,
+            version: version,
+            description: fullDesc,
+            path: pkgPath,
+            nodeLabel: nodeLabel,
+            npmBinaryPath: npmBinaryPath,
+            sizeBytes: size,
+            isInsideNvm: isInsideNvm
+        )
     }
     
     private func calculateDirectorySize(atPath path: String) -> Int {
