@@ -37,6 +37,25 @@ public struct NpmGlobalPackageItem: Identifiable, Sendable {
     public let isInsideNvm: Bool
 }
 
+public struct PyenvPythonItem: Identifiable, Sendable {
+    public var id: String { path }
+    public let version: String
+    public let path: String
+    public let isDefault: Bool
+    public let sizeBytes: Int
+}
+
+public struct PipPackageItem: Identifiable, Sendable {
+    public var id: String { distInfoPath }
+    public let name: String
+    public let version: String
+    public let description: String
+    public let distInfoPath: String
+    public let pythonLabel: String
+    public let pipBinaryPath: String
+    public let sizeBytes: Int
+}
+
 private struct NpmPackageJSON: Decodable {
     let name: String?
     let version: String?
@@ -299,6 +318,136 @@ public struct LocalSystemScanner: Sendable {
         )
     }
     
+    /// Scans `~/.pyenv/versions` for installed Python runtimes and user-requested `pip` packages (PEP 376 `REQUESTED` marker).
+    public func scanPyenvAndPip() -> (pyenvPythons: [PyenvPythonItem], pipPackages: [PipPackageItem]) {
+        var pyenvPythons: [PyenvPythonItem] = []
+        var pipPackages: [PipPackageItem] = []
+        
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let pyenvDir = "\(home)/.pyenv"
+        let pyenvVersionsDir = "\(pyenvDir)/versions"
+        
+        let defaultVersion: String? = {
+            let verFile = "\(pyenvDir)/version"
+            guard let raw = try? String(contentsOfFile: verFile, encoding: .utf8) else { return nil }
+            let trimmed = raw.components(separatedBy: .newlines).first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }()
+        
+        guard let versions = try? FileManager.default.contentsOfDirectory(atPath: pyenvVersionsDir) else {
+            return ([], [])
+        }
+        
+        let sortedVersions = versions.filter { !$0.hasPrefix(".") }.sorted {
+            $0.localizedStandardCompare($1) == .orderedDescending
+        }
+        
+        let builtInPackages: Set<String> = ["pip", "setuptools", "wheel"]
+        
+        for ver in sortedVersions {
+            let verPath = "\(pyenvVersionsDir)/\(ver)"
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: verPath, isDirectory: &isDir), isDir.boolValue else { continue }
+            
+            // Skip virtualenvs that are symlinks unless they are real directories
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: verPath),
+               attrs[.type] as? FileAttributeType == .typeSymbolicLink {
+                continue
+            }
+            
+            let totalSize = calculateDirectorySize(atPath: verPath)
+            let isDefault = (defaultVersion == ver)
+            
+            pyenvPythons.append(PyenvPythonItem(
+                version: ver,
+                path: verPath,
+                isDefault: isDefault,
+                sizeBytes: totalSize
+            ))
+            
+            let pipBin = "\(verPath)/bin/pip"
+            let libDir = "\(verPath)/lib"
+            guard let libEntries = try? FileManager.default.contentsOfDirectory(atPath: libDir) else { continue }
+            
+            for libEntry in libEntries where libEntry.hasPrefix("python") {
+                let sitePackagesDir = "\(libDir)/\(libEntry)/site-packages"
+                guard let spEntries = try? FileManager.default.contentsOfDirectory(atPath: sitePackagesDir) else { continue }
+                
+                for spEntry in spEntries where spEntry.hasSuffix(".dist-info") {
+                    let distInfoPath = "\(sitePackagesDir)/\(spEntry)"
+                    let requestedFile = "\(distInfoPath)/REQUESTED"
+                    guard FileManager.default.fileExists(atPath: requestedFile) else { continue }
+                    
+                    let meta = parsePipMetadata(atPath: "\(distInfoPath)/METADATA", fallbackDirName: spEntry)
+                    if builtInPackages.contains(meta.name.lowercased()) { continue }
+                    
+                    let pkgSize = calculatePipPackageSize(
+                        sitePackagesDir: sitePackagesDir,
+                        distInfoPath: distInfoPath
+                    )
+                    let fullDesc = meta.version.isEmpty ? meta.summary : "v\(meta.version) · \(meta.summary)"
+                    
+                    pipPackages.append(PipPackageItem(
+                        name: meta.name,
+                        version: meta.version,
+                        description: fullDesc,
+                        distInfoPath: distInfoPath,
+                        pythonLabel: "Python \(ver)",
+                        pipBinaryPath: pipBin,
+                        sizeBytes: pkgSize
+                    ))
+                }
+            }
+        }
+        
+        return (pyenvPythons, pipPackages)
+    }
+    
+    private func parsePipMetadata(atPath metadataPath: String, fallbackDirName: String) -> (name: String, version: String, summary: String) {
+        let baseFallback = fallbackDirName.replacingOccurrences(of: ".dist-info", with: "")
+        var name = baseFallback
+        var version = ""
+        var summary = "Pip package"
+        
+        guard let content = try? String(contentsOfFile: metadataPath, encoding: .utf8) else {
+            return (name, version, summary)
+        }
+        
+        for line in content.components(separatedBy: .newlines) {
+            if line.isEmpty { break } // End of RFC 822 headers in METADATA
+            if line.hasPrefix("Name: ") {
+                name = String(line.dropFirst("Name: ".count)).trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("Version: ") {
+                version = String(line.dropFirst("Version: ".count)).trimmingCharacters(in: .whitespaces)
+            } else if line.hasPrefix("Summary: ") {
+                let s = String(line.dropFirst("Summary: ".count)).trimmingCharacters(in: .whitespaces)
+                if !s.isEmpty && s != "UNKNOWN" {
+                    summary = s
+                }
+            }
+        }
+        return (name, version, summary)
+    }
+    
+    private func calculatePipPackageSize(sitePackagesDir: String, distInfoPath: String) -> Int {
+        let recordPath = "\(distInfoPath)/RECORD"
+        guard let content = try? String(contentsOfFile: recordPath, encoding: .utf8) else {
+            return calculateDirectorySize(atPath: distInfoPath)
+        }
+        
+        var total = 0
+        for line in content.components(separatedBy: .newlines) where !line.isEmpty {
+            let parts = line.split(separator: ",", omittingEmptySubsequences: false)
+            if parts.count >= 3, let bytes = Int(parts[2].trimmingCharacters(in: .whitespaces)) {
+                total += bytes
+            } else if let firstPart = parts.first, !firstPart.isEmpty {
+                let filePath = "\(sitePackagesDir)/\(firstPart)"
+                total += calculateFileSize(atPath: filePath)
+            }
+        }
+        return total > 0 ? total : calculateDirectorySize(atPath: distInfoPath)
+    }
+    
     private func calculateDirectorySize(atPath path: String) -> Int {
         let url = URL(fileURLWithPath: path)
         guard let enumerator = FileManager.default.enumerator(at: url, includingPropertiesForKeys: [.fileSizeKey]) else {
@@ -321,3 +470,4 @@ public struct LocalSystemScanner: Sendable {
         return size
     }
 }
+

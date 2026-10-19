@@ -10,22 +10,25 @@ Designed to be lightweight, responsive, and completely buildable from the termin
 
 - **Installed Formulae & Casks Management**:
   - Automatically locates your Homebrew installation (`/opt/homebrew` on Apple Silicon, `/usr/local/Homebrew` on Intel).
-  - Inspects all installed formulae and casks, their dependencies, versions, descriptions, and pinned status.
-  - Calculates physical disk usage per package and aggregate disk consumption across all casks and formulae.
+  - Inspects all installed formulae and casks, their dependencies, versions, descriptions, and outdated versions (`brew outdated --greedy`).
+  - Calculates physical disk usage per package and deduplicated aggregate disk consumption across shared dependencies.
+- **Multi-Runtime & Local Binary Auditing (`LocalSystemScanner`)**:
+  - **NVM & Global NPM Packages (`Node/NPM`)**: Scans `~/.nvm/versions/node/*` for installed Node.js runtimes and discovers all global npm packages (including `@scope/pkg` packages) across NVM, Homebrew, and `~/.npm-global`.
+  - **pyenv & Pip Packages (`Python/Pip`)**: Scans `~/.pyenv/versions/*` for installed Python runtimes and inspects PEP 376 `REQUESTED` markers + `RECORD` manifests to list user-installed `pip` packages with exact byte sizes.
+  - **Standalone Terminal Emulators (`Apps`)**: Audits `/Applications`, `/System/Applications/Utilities`, and `~/Applications` for terminal apps installed outside Homebrew (protecting macOS `Terminal.app` from deletion).
+  - **Local Binaries (`~/.local/bin`)**: Lists custom CLI scripts, binaries, and symlinks with target resolution and disk footprint.
 - **Safe Uninstallation**:
   - Displays confirmation dialog before destructive actions.
-  - Detects and removes corresponding `.app` bundles from `/Applications` and `~/Applications`.
-  - Runs automatic dependency pruning (`brew autoremove`) to keep the system clean.
+  - Uses `brew uninstall` (+ `brew autoremove`), `npm uninstall -g`, `pip uninstall -y`, runtime folder removal, or macOS Trash depending on package kind.
 - **Backup, Export & Import Checklist**:
-  - Export full installation inventory to JSON for migration or backup.
+  - Export full installation inventory to JSON or `Brewfile` for migration or backup.
   - Import checklist allowing selective or batch re-installation of packages.
 - **macOS Desktop & Notification Center Widget**:
   - Native WidgetKit extension supporting `systemSmall` and `systemMedium` families.
-  - Monitors total audited disk space, installed applications count, and package count right on your macOS desktop.
-  - Updates automatically or on demand when package state changes in the main app.
+  - Monitors total deduplicated disk space, installed applications count, and package count right on your macOS desktop.
 - **Cooperative Concurrency & Streaming Logs**:
-  - Async/await architecture using Swift concurrency.
-  - Real-time command streaming (`ProcessRunner`) with dismissable terminal log sheet for long-running operations.
+  - Async/await architecture using Swift concurrency and a serial `BrewQueue` actor.
+  - Real-time command streaming (`ProcessRunner`) with dismissable terminal log console.
 
 ---
 

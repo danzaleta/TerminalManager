@@ -107,5 +107,10 @@ final class TerminalManagerTests: XCTestCase {
         let (nvmNodes, npmGlobals) = scanner.scanNvmAndNpm()
         XCTAssertGreaterThanOrEqual(nvmNodes.count, 0)
         XCTAssertGreaterThanOrEqual(npmGlobals.count, 0)
+        
+        let (pyenvPythons, pipPackages) = scanner.scanPyenvAndPip()
+        XCTAssertGreaterThanOrEqual(pyenvPythons.count, 0)
+        XCTAssertGreaterThanOrEqual(pipPackages.count, 0)
     }
 }
+

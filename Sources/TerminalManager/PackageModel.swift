@@ -103,6 +103,8 @@ public enum PackageKind: String, Sendable {
     case localBinary
     case nvmNode
     case npmGlobal
+    case pyenvPython
+    case pipPackage
 }
 
 public struct PackageDisplayItem: Identifiable, Sendable {
@@ -123,6 +125,8 @@ public struct PackageDisplayItem: Identifiable, Sendable {
     public var isLocalBinary: Bool { kind == .localBinary }
     public var isNvmNode: Bool { kind == .nvmNode }
     public var isNpmGlobal: Bool { kind == .npmGlobal }
+    public var isPyenvPython: Bool { kind == .pyenvPython }
+    public var isPipPackage: Bool { kind == .pipPackage }
     public var hasUpdate: Bool { outdatedVersion != nil }
     
     public init(
